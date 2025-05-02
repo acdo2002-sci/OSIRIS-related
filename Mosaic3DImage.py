@@ -3,6 +3,8 @@ import os
 from astropy.io import fits
 import numpy as np
 import time
+import gc
+gc.collect()
 
 """
 Changeable Parameters:
@@ -27,15 +29,16 @@ Ycenter = myldf['Ycen']
 # === Initialize cubes ===
 shape = (1665, 181, 61, len(fileNames)) # [z, y, x, FileNumber]
 cube_shape = shape[:3] # [z, y, x]
-all_data = np.zeros(shape)
-all_IntAuxData = np.zeros(shape)
-all_noise_data = np.zeros(shape)
-noise_data = np.zeros(cube_shape)
-first_mean_data = np.zeros(cube_shape)
-stacked_count_cube = np.zeros(cube_shape)
-deviation_data = np.zeros(shape)
-second_mean_data = np.zeros(cube_shape)
-second_mean_good_count = np.zeros(cube_shape)
+all_data = np.zeros(shape, dtype=np.float32)
+all_IntAuxData = np.zeros(shape, dtype=np.float32)
+all_noise_data = np.zeros(shape, dtype=np.float32)
+noise_data = np.zeros(cube_shape, dtype=np.float32)
+first_mean_data = np.zeros(cube_shape, dtype=np.float32)
+stacked_count_cube = np.zeros(cube_shape, dtype=np.float32)
+deviation_data = np.zeros(shape, dtype=np.float32)
+noise_variance = np.zeros(shape, dtype=np.float32)
+second_mean_data = np.zeros(cube_shape, dtype=np.float32)
+second_mean_good_count = np.zeros(cube_shape, dtype=np.float32)
 
 # === First loop: accumulate mean and count ===
 for idx, fname in enumerate(fileNames):
@@ -57,8 +60,6 @@ for idx, fname in enumerate(fileNames):
     
     ys = slice(ref_center[1] - offset_down, ref_center[1] + offset_up)
     xs = slice(ref_center[0] - offset_left, ref_center[0] + offset_right)
-    # print(ys)
-    # print(xs)
     
     # Put data into 4D (z,y,x,fileNumber)
     all_data[:, ys, xs, idx] = data
@@ -71,12 +72,15 @@ for idx, fname in enumerate(fileNames):
     
     # Calculate Noise
     noise_data[:, ys, xs] += noise ** 2
-    
+
+    del data
+    del noise
+    del int_aux
 
 # Avoid division by zero
 with np.errstate(divide='ignore', invalid='ignore'):
     first_mean_data = np.true_divide(first_mean_data, stacked_count_cube)
-    noise_data = np.sqrt(np.true_divide(noise_data, stacked_count_cube))
+    noise_data = np.true_divide(np.sqrt(noise_data), stacked_count_cube)
     first_mean_data[np.isnan(first_mean_data)] = 0
     noise_data[np.isnan(first_mean_data)] = 0
 
@@ -86,12 +90,17 @@ for idx in range(len(fileNames)):
     valid_mask = all_IntAuxData[:, :, :, idx] > 0
     diff = all_data[:, :, :, idx] - first_mean_data
     deviation_data[:, :, :, idx][valid_mask] = diff[valid_mask] ** 2
+    noise_variance[:, :, :, idx][valid_mask] = all_noise_data[:, :, :, idx][valid_mask] ** 2
+
+    del valid_mask
+    del diff
 
 # Calculate the variance (data - mean)**2 / N 
 with np.errstate(divide='ignore', invalid='ignore'):
-    variance_data = np.sum(deviation_data, axis=3) / stacked_count_cube
+    variance_data = np.sum(deviation_data + noise_variance, axis=3) / stacked_count_cube
     variance_data[np.isnan(variance_data)] = 0
     
+del first_mean_data
 # === Third pass: filtered average using deviation clip ===   
 for idx in range(len(fileNames)):
     print(f'Third loop: {idx}')
@@ -100,6 +109,8 @@ for idx in range(len(fileNames)):
 
     second_mean_data[valid_mask] += all_data[:, :, :, idx][valid_mask]
     second_mean_good_count[valid_mask] += 1
+
+    del valid_mask
 
 # Final average and cutout
 with np.errstate(divide='ignore', invalid='ignore'):
